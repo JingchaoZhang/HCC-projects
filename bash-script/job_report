@@ -1,0 +1,189 @@
+#!/bin/bash
+# Calculation functions (using variables from SLURM sacct command):
+# Job_Request_Time = $TimeLimit
+# Job_Run_Time = $End-$Start
+# Job_Req_Mem = $ReqMem*$AllocCPUS
+# Job_Max_Mem = (Maximum $MaxRSS)*NNodes
+
+user=`whoami`
+days=7
+
+usage()
+{
+cat << EOF
+usage: $0 [-hud]
+
+This script generates a report showing jobs whose run time are less than half of their requested wall time,
+or the maximum memory usages less than half of the requested memory.
+
+OPTIONS:
+-h      Show this message
+-u      UserID to check			(default is $user)
+-d      Number of days to trace back	(default is 7)
+EOF
+}
+
+while getopts :h:d:u: OPTION
+do
+	case $OPTION in
+		h)
+			usage
+			exit 1
+			;;
+		d)
+			days=$OPTARG
+			;;
+		u)
+			user=$OPTARG
+			;;
+		?)
+			usage
+			exit
+			;;
+	esac
+done
+
+time=`date --date="$days day ago" +%Y-%m-%d`
+echo "----------------------------------------------------------------------------"
+echo "Jobs submitted by $user from $time to `date +%Y-%m-%d`"
+echo "----------------------------------------------------------------------------"
+
+# time2s () $TimeLimit
+time2s () {
+if [[ $1 == *-* ]]; then
+	echo $1 | awk -F'[-:]' '{print $1*86400+$2*3600+$3*60+$4}'
+else
+	echo $1 | awk -F'[:]' '{print $1*3600+$2*60+$3}'
+fi
+}
+
+# s2time () $Run_time
+s2time () {
+if [[ $1 -ge 86400 ]]; then
+	day=$(echo "scale=0; $1/86400" | bc)
+	residue1=$(echo "$1-$day*86400" | bc)
+	if [[ $residue1 -ge 3600 ]]; then
+		hour=$(echo "scale=0; $residue1/3600" | bc)
+	else
+		hour="00"
+	fi
+	residue2=$(echo "$residue1-$hour*3600" | bc)
+	if [[ $residue2 -ge 60 ]]; then
+		min=$(echo "scale=0; $residue2/60" | bc)
+	else
+		min="00"
+	fi
+	second=$(echo "$residue2-$min*60" | bc)
+	printf "%02d-%02d:%02d:%02d\n" $day $hour $min $second
+elif [[ "$1 -lt 86400" && "$1 -ge 3600" ]]; then
+	hour=$(echo "scale=0; $1/3600" | bc)
+	residue1=$(echo "$1-$hour*3600" | bc)
+	if [[ $residue1 -ge 60 ]]; then
+		min=$(echo "scale=0; $residue1/60" | bc)
+	else
+		min="00"
+	fi
+	second=$(echo "$residue1-$min*60" | bc)
+	printf "%02d:%02d:%02d\n" $hour $min $second
+elif [[ "$1 -lt 3600" && "$1 -ge 60" ]]; then
+	hour="00"
+	min=$(echo "scale=0; $1/60" | bc)
+	second=$(echo "$1-$min*60" | bc)
+	printf "%02d:%02d:%02d\n" $hour $min $second
+else
+	hour="00"
+	min="00"
+	second="$1"
+	printf "%02d:%02d:%02d\n" $hour $min $second
+fi
+}
+
+# Usage of mem2Gb function:
+# mem2Gb () JobID,ReqMem,AllocCPUS,Nnodes
+mem2Gb () {
+# Get the MaxRSS in different job step for the same JobID
+MaxMem=$(sacct -j $1 -P -o JobID,MaxRSS | sed '/JobID/d' | cut -d "|" -f 2 | sed '/^$/d' | while read line
+do
+	if [[ $line == *K ]]; then
+		MemK="`echo $line | cut -d "K" -f 1`"
+		echo $MemK
+	elif [[ $line == *M ]]; then
+		MemM="`echo $line | cut -d "M" -f 1`"
+		MemK=$(echo "scale=0; $MemM*1024" | bc)
+		echo $MemK
+	else
+		MemG="`echo $line | cut -d "G" -f 1`"
+		MemK=$(echo "scale=0; $MemG*1024*1024" | bc)
+		echo $MemK
+	fi
+done | sort -n | tail -1)
+if [[ $2 == *Mc ]]; then
+	v1="`echo $2 | cut -d "M" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$3" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+	boolean="`echo "$ratio < 0.5" | bc`" #Bash cannot handle float comparison, use bc instead
+	if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Mb | Maximum memory usage %.1f Mb\n" $1 $RequestMem $MaxUseMem
+	fi
+elif [[ $2 == *Mn ]]; then
+	v1="`echo $2 | cut -d "M" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$4" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Mb | Maximum memory usage %.1f Mb\n" $1 $RequestMem $MaxUseMem
+	fi
+elif [[ $2 == *Gc ]]; then
+	v1="`echo $2 | cut -d "G" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$3" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Gb | Maximum memory usage %.3f Gb\n" $1 $RequestMem $MaxUseMem
+	fi
+else
+	v1="`echo $2 | cut -d "G" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$4" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Gb | Maximum memory usage %.3f Gb\n" $1 $RequestMem $MaxUseMem
+	fi
+fi
+}
+
+echo "The following jobs' run time is less than half of their requested wall time:"
+echo "----------------------------------------------------------------------------"
+sleep 2
+Query=`sacct -u $user -S $time -s CD -P -o JobID,Group,Submit,Start,Timelimit,AllocCPUS,CPUTimeRAW,ReqMem,NNodes | base64 | tr '\n' '#'`
+echo $Query | tr '#' '\n' | base64 -d | sed '/nfsnobody/d' | sed '/JobID/d' | while read line
+do
+	submit_time=$(date +%s -d "`echo $line | cut -d "|" -f 3`")			#Submit
+	start_time=$(date +%s -d "`echo $line | cut -d "|" -f 4`")			#Start
+	wait_time=$(($start_time-$submit_time))						#Start-Submit
+	run_time=$((`echo $line | cut -d "|" -f 7`/`echo $line | cut -d "|" -f 6`))	#CPUTimeRAW/AllocCPUS 
+	Timelimit="`echo $line | cut -d "|" -f 5`"					#Timelimit
+	request_time="`time2s $Timelimit`"
+	runvsrequest=$(echo "scale=5; $run_time/$request_time" | bc)
+	boolean="`echo "$runvsrequest < 0.5" | bc`"
+	if [[ $boolean == 1 ]]; then
+		echo "JobID `echo $line | cut -d "|" -f 1` | Requested_time `echo $line | cut -d "|" -f 5` | Run_time `s2time $run_time`"
+	fi
+done
+echo "----------------------------------------------------------------------------"
+echo "The following jobs' memory usage is less than half of their requested memory:"
+echo "----------------------------------------------------------------------------"
+sleep 2
+echo $Query | tr '#' '\n' | base64 -d | sed '/nfsnobody/d' | sed '/JobID/d' | while read line
+do
+        v1="`echo $line | cut -d "|" -f 1`"     #JobID
+        v2="`echo $line | cut -d "|" -f 8`"     #ReqMem
+        v3="`echo $line | cut -d "|" -f 6`"     #AllocCPUS
+        v4="`echo $line | cut -d "|" -f 9`"     #NNodes
+        mem2Gb $v1 $v2 $v3 $v4
+done
+echo "----------------------------------------------------------------------------"

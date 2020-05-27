@@ -1,0 +1,168 @@
+#!/bin/bash
+# Calculation functions (using variables from SLURM sacct command):
+# Job_Request_Time = $TimeLimit
+# Job_Run_Time = $End-$Start
+# Job_Req_Mem = $ReqMem*$AllocCPUS
+# Job_Max_Mem = (Maximum $MaxRSS)*NNodes
+# Change a Line
+
+user=`whoami`
+echo "Type the number of days you want to trace back, followed by [ENTER]:"
+read days
+time=`date --date="$days day ago" +%Y-%m-%d`
+echo "----------------------------------------------------------------------------"
+echo "Jobs submitted by $user from $time to `date +%Y-%m-%d`"
+echo "----------------------------------------------------------------------------"
+
+# time2s () $TimeLimit
+time2s () {
+if [[ $1 == *-* ]]; then
+	echo $1 | awk -F'[-:]' '{print $1*86400+$2*3600+$3*60+$4}'
+else
+	echo $1 | awk -F'[:]' '{print $1*3600+$2*60+$3}'
+fi
+}
+
+# s2time () $Run_time
+s2time () {
+if [[ $1 -ge 86400 ]]; then
+	day=$(echo "scale=0; $1/86400" | bc)
+	residue1=$(echo "$1-$day*86400" | bc)
+	if [[ $residue1 -ge 3600 ]]; then
+		hour=$(echo "scale=0; $residue1/3600" | bc)
+	else
+		hour="00"
+	fi
+	residue2=$(echo "$residue1-$hour*3600" | bc)
+	if [[ $residue2 -ge 60 ]]; then
+		min=$(echo "scale=0; $residue2/60" | bc)
+	else
+		min="00"
+	fi
+	second=$(echo "$residue2-$min*60" | bc)
+	printf "%02d-%02d:%02d:%02d\n" $day $hour $min $second
+elif [[ "$1 -lt 86400" && "$1 -ge 3600" ]]; then
+	hour=$(echo "scale=0; $1/3600" | bc)
+	residue1=$(echo "$1-$hour*3600" | bc)
+	if [[ $residue1 -ge 60 ]]; then
+		min=$(echo "scale=0; $residue1/60" | bc)
+	else
+		min="00"
+	fi
+	second=$(echo "$residue1-$min*60" | bc)
+	printf "%02d:%02d:%02d\n" $hour $min $second
+elif [[ "$1 -lt 3600" && "$1 -ge 60" ]]; then
+	hour="00"
+	min=$(echo "scale=0; $1/60" | bc)
+	second=$(echo "$1-$min*60" | bc)
+	printf "%02d:%02d:%02d\n" $hour $min $second
+else
+	hour="00"
+	min="00"
+	second="$1"
+	printf "%02d:%02d:%02d\n" $hour $min $second
+fi
+}
+
+# Usage of mem2Gb function:
+# mem2Gb () JobID,ReqMem,AllocCPUS,Nnodes
+mem2Gb () {
+# Get the MaxRSS in different job step for the same JobID
+sacct -j $1 -P -o JobID,MaxRSS > Mem.tmp1
+sed '/JobID/d' Mem.tmp1 > Mem.tmp2
+cat Mem.tmp2 | cut -d "|" -f 2 > Mem.tmp3
+sed '/^$/d' Mem.tmp3  > Mem.tmp4
+while read line
+do
+	if [[ $line == *K ]]; then
+		MemK="`echo $line | cut -d "K" -f 1`"
+		echo $MemK >> Mem.tmp5
+	elif [[ $line == *M ]]; then
+		MemM="`echo $line | cut -d "M" -f 1`"
+		MemK=$(echo "scale=0; $MemM*1024" | bc)
+		echo $MemK >> Mem.tmp5
+	else
+		MemG="`echo $line | cut -d "G" -f 1`"
+		MemK=$(echo "scale=0; $MemG*1024*1024" | bc)
+		echo $MemK >> Mem.tmp5
+	fi
+done < Mem.tmp4
+cat Mem.tmp5 | sort -n > Mem
+rm Mem.tmp5
+MaxMem=`tail -1 Mem`
+if [[ $2 == *Mc ]]; then
+	v1="`echo $2 | cut -d "M" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$3" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+	boolean="`echo "$ratio < 0.5" | bc`" #Bash cannot handle float comparison, use bc instead
+	if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Mb | Maximum memory usage %.1f Mb\n" $1 $RequestMem $MaxUseMem
+	fi
+elif [[ $2 == *Mn ]]; then
+	v1="`echo $2 | cut -d "M" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$4" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Mb | Maximum memory usage %.1f Mb\n" $1 $RequestMem $MaxUseMem
+	fi
+elif [[ $2 == *Gc ]]; then
+	v1="`echo $2 | cut -d "G" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$3" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Gb | Maximum memory usage %.3f Gb\n" $1 $RequestMem $MaxUseMem
+	fi
+else
+	v1="`echo $2 | cut -d "G" -f 1`"
+	RequestMem=$(echo "scale=1; $v1*$4" | bc)
+	MaxUseMem=$(echo "scale=5; $MaxMem/1024/1024*$4" | bc)
+	ratio=$(echo "scale=5; $MaxUseMem/$RequestMem" | bc)
+        boolean="`echo "$ratio < 0.5" | bc`"
+        if [[ $boolean == 1 ]]; then
+	printf "JobID %d | Requested memory %d Gb | Maximum memory usage %.3f Gb\n" $1 $RequestMem $MaxUseMem
+	fi
+fi
+}
+
+sacct -u $user -S $time -P -o JobID,State,User,Group,Submit,Start,End,Timelimit,ReqMem,MaxRSS,MaxVMSize,ReqCPUS,AllocCPUS,CPUTimeRAW,Nnodes > 1.tmp
+sed '/nfsnobody/d' 1.tmp > 2.tmp
+sed -n '/COMPLETED/p' 2.tmp > COMPLETED.tmp
+rm 1.tmp 2.tmp
+
+echo "The following jobs' run time is less than half of their requested wall time:"
+echo "----------------------------------------------------------------------------"
+sleep 5
+while read line
+do
+	submit_time=$(date +%s -d "`echo $line | cut -d "|" -f 5`")
+	start_time=$(date +%s -d "`echo $line | cut -d "|" -f 6`")
+	wait_time=$(($start_time-$submit_time))
+	run_time=$((`echo $line | cut -d "|" -f 14`/`echo $line | cut -d "|" -f 13`))
+	Timelimit="`echo $line | cut -d "|" -f 8`"
+	request_time="`time2s $Timelimit`"
+	runvsrequest=$(echo "scale=5; $run_time/$request_time" | bc)
+	boolean="`echo "$runvsrequest < 0.5" | bc`"
+	if [[ $boolean == 1 ]]; then
+		echo "JobID `echo $line | cut -d "|" -f 1` | Requested_time `echo $line | cut -d "|" -f 8` | Run_time `s2time $run_time`"
+	fi
+done < COMPLETED.tmp
+echo "----------------------------------------------------------------------------"
+echo "The following jobs' memory usage is less than half of their requested memory:"
+echo "----------------------------------------------------------------------------"
+sleep 5
+while read line
+do
+	v1="`echo $line | cut -d "|" -f 1`"
+	v2="`echo $line | cut -d "|" -f 9`"
+	v3="`echo $line | cut -d "|" -f 13`"
+	v4="`echo $line | cut -d "|" -f 15`"
+	mem2Gb $v1 $v2 $v3 $v4
+done < COMPLETED.tmp
+rm COMPLETED.tmp 2> /dev/null
+rm Mem* 2> /dev/null
+echo "----------------------------------------------------------------------------"
